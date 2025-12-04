@@ -1055,9 +1055,9 @@ class PersonalTracker(tk.Tk):
 
     def _create_tasks_tab(self):
         """Create the tasks management tab"""
-        # Top toolbar
+        # Top toolbar row 1
         toolbar = ttk.Frame(self.tasks_frame)
-        toolbar.pack(fill='x', pady=(0, 10))
+        toolbar.pack(fill='x', pady=(0, 5))
 
         # Add task button
         ttk.Button(toolbar, text="+ Add Task", style='Accent.TButton',
@@ -1067,49 +1067,96 @@ class PersonalTracker(tk.Tk):
         ttk.Label(toolbar, text="Search:").pack(side='left', padx=(20, 5))
         self.search_var = tk.StringVar()
         self.search_var.trace('w', lambda *args: self._refresh_task_list())
-        ttk.Entry(toolbar, textvariable=self.search_var, width=25).pack(side='left')
+        ttk.Entry(toolbar, textvariable=self.search_var, width=20).pack(side='left')
 
-        # Filter by classification
-        ttk.Label(toolbar, text="Category:").pack(side='left', padx=(20, 5))
-        self.filter_class_var = tk.StringVar(value="All")
-        filter_class = ttk.Combobox(toolbar, textvariable=self.filter_class_var,
-                                   values=["All"] + self.CLASSIFICATIONS, width=15, state='readonly')
-        filter_class.pack(side='left')
-        filter_class.bind('<<ComboboxSelected>>', lambda e: self._refresh_task_list())
+        # View mode toggle
+        ttk.Label(toolbar, text="View:").pack(side='left', padx=(15, 5))
+        self.view_mode_var = tk.StringVar(value="list")
+        view_frame = ttk.Frame(toolbar)
+        view_frame.pack(side='left')
+        ttk.Radiobutton(view_frame, text="List", variable=self.view_mode_var,
+                       value="list", command=self._refresh_task_list).pack(side='left')
+        ttk.Radiobutton(view_frame, text="Grouped", variable=self.view_mode_var,
+                       value="grouped", command=self._refresh_task_list).pack(side='left')
 
-        # Filter by importance
-        ttk.Label(toolbar, text="Importance:").pack(side='left', padx=(20, 5))
-        self.filter_imp_var = tk.StringVar(value="All")
-        filter_imp = ttk.Combobox(toolbar, textvariable=self.filter_imp_var,
-                                 values=["All"] + self.IMPORTANCE_LEVELS, width=10, state='readonly')
-        filter_imp.pack(side='left')
-        filter_imp.bind('<<ComboboxSelected>>', lambda e: self._refresh_task_list())
+        # Sort options
+        ttk.Label(toolbar, text="Sort:").pack(side='left', padx=(15, 5))
+        self.sort_var = tk.StringVar(value="importance")
+        sort_combo = ttk.Combobox(toolbar, textvariable=self.sort_var,
+                                 values=["importance", "due_date", "progress", "name", "category"],
+                                 width=10, state='readonly')
+        sort_combo.pack(side='left')
+        sort_combo.bind('<<ComboboxSelected>>', lambda e: self._refresh_task_list())
 
         # Quick stats
         self.quick_stats_label = ttk.Label(toolbar, text="", style='Stats.TLabel')
         self.quick_stats_label.pack(side='right', padx=10)
 
-        # Tasks list with scrollbar
-        list_container = ttk.Frame(self.tasks_frame)
-        list_container.pack(fill='both', expand=True)
+        # Toolbar row 2 - Quick category filters
+        filter_toolbar = ttk.Frame(self.tasks_frame)
+        filter_toolbar.pack(fill='x', pady=(0, 5))
 
-        # Create treeview for tasks
+        ttk.Label(filter_toolbar, text="Quick Filter:").pack(side='left', padx=5)
+
+        # All button
+        self.filter_class_var = tk.StringVar(value="All")
+        self.category_buttons = {}
+
+        all_btn = ttk.Button(filter_toolbar, text="All", width=6,
+                            command=lambda: self._set_category_filter("All"))
+        all_btn.pack(side='left', padx=2)
+        self.category_buttons["All"] = all_btn
+
+        # Category buttons with task counts
+        for cat in self.CLASSIFICATIONS:
+            short_name = cat.split()[0][:6]  # First word, max 6 chars
+            btn = ttk.Button(filter_toolbar, text=short_name, width=8,
+                            command=lambda c=cat: self._set_category_filter(c))
+            btn.pack(side='left', padx=2)
+            self.category_buttons[cat] = btn
+
+        # Filter by importance (moved to end)
+        ttk.Label(filter_toolbar, text="Importance:").pack(side='left', padx=(15, 5))
+        self.filter_imp_var = tk.StringVar(value="All")
+        filter_imp = ttk.Combobox(filter_toolbar, textvariable=self.filter_imp_var,
+                                 values=["All"] + self.IMPORTANCE_LEVELS, width=10, state='readonly')
+        filter_imp.pack(side='left')
+        filter_imp.bind('<<ComboboxSelected>>', lambda e: self._refresh_task_list())
+
+        # Main content area with tasks and category overview
+        content_frame = ttk.Frame(self.tasks_frame)
+        content_frame.pack(fill='both', expand=True)
+
+        # Left side - Task list
+        list_container = ttk.Frame(content_frame)
+        list_container.pack(side='left', fill='both', expand=True)
+
+        # Create treeview for tasks (with tree column for grouping)
         columns = ('name', 'classification', 'importance', 'due', 'progress')
-        self.task_tree = ttk.Treeview(list_container, columns=columns, show='headings',
+        self.task_tree = ttk.Treeview(list_container, columns=columns, show='tree headings',
                                       selectmode='browse')
 
-        # Configure columns
-        self.task_tree.heading('name', text='Task Name', anchor='w')
-        self.task_tree.heading('classification', text='Category', anchor='w')
-        self.task_tree.heading('importance', text='Importance', anchor='w')
-        self.task_tree.heading('due', text='Due Date', anchor='w')
-        self.task_tree.heading('progress', text='Progress', anchor='w')
+        # Configure tree column (for grouping)
+        self.task_tree.heading('#0', text='', anchor='w')
+        self.task_tree.column('#0', width=30, minwidth=30, stretch=False)
 
-        self.task_tree.column('name', width=300, minwidth=200)
-        self.task_tree.column('classification', width=150, minwidth=100)
-        self.task_tree.column('importance', width=100, minwidth=80)
-        self.task_tree.column('due', width=150, minwidth=100)
-        self.task_tree.column('progress', width=100, minwidth=80)
+        # Configure columns
+        self.task_tree.heading('name', text='Task Name', anchor='w',
+                              command=lambda: self._sort_by_column('name'))
+        self.task_tree.heading('classification', text='Category', anchor='w',
+                              command=lambda: self._sort_by_column('category'))
+        self.task_tree.heading('importance', text='Importance', anchor='w',
+                              command=lambda: self._sort_by_column('importance'))
+        self.task_tree.heading('due', text='Due Date', anchor='w',
+                              command=lambda: self._sort_by_column('due_date'))
+        self.task_tree.heading('progress', text='Progress', anchor='w',
+                              command=lambda: self._sort_by_column('progress'))
+
+        self.task_tree.column('name', width=280, minwidth=150)
+        self.task_tree.column('classification', width=120, minwidth=80)
+        self.task_tree.column('importance', width=80, minwidth=60)
+        self.task_tree.column('due', width=130, minwidth=100)
+        self.task_tree.column('progress', width=80, minwidth=60)
 
         # Scrollbars
         v_scroll = ttk.Scrollbar(list_container, orient='vertical',
@@ -1130,6 +1177,18 @@ class PersonalTracker(tk.Tk):
         # Configure tags for importance colors
         for imp, color in self.IMPORTANCE_COLORS.items():
             self.task_tree.tag_configure(imp, background=color)
+
+        # Tag for group headers
+        self.task_tree.tag_configure('group_header', font=('Arial', 10, 'bold'),
+                                     background='#e0e0e0')
+
+        # Right side - Category Overview Panel
+        overview_frame = ttk.LabelFrame(content_frame, text="Category Overview", padding="10")
+        overview_frame.pack(side='right', fill='y', padx=(10, 0))
+
+        self.category_overview = tk.Text(overview_frame, width=25, height=20,
+                                        state='disabled', font=('Arial', 9))
+        self.category_overview.pack(fill='both', expand=True)
 
         # Bind double-click to edit
         self.task_tree.bind('<Double-1>', self._on_task_double_click)
@@ -1154,20 +1213,44 @@ class PersonalTracker(tk.Tk):
         action_frame = ttk.Frame(self.tasks_frame)
         action_frame.pack(fill='x', pady=(10, 0))
 
-        ttk.Button(action_frame, text="Complete Task",
-                  command=self._complete_selected_task).pack(side='left', padx=5)
-        ttk.Button(action_frame, text="Edit Task",
-                  command=self._edit_selected_task).pack(side='left', padx=5)
-        ttk.Button(action_frame, text="Delete Task",
-                  command=self._delete_selected_task).pack(side='left', padx=5)
-        ttk.Button(action_frame, text="Update Progress",
-                  command=self._update_task_progress).pack(side='left', padx=5)
+        ttk.Button(action_frame, text="Complete",
+                  command=self._complete_selected_task).pack(side='left', padx=3)
+        ttk.Button(action_frame, text="Edit",
+                  command=self._edit_selected_task).pack(side='left', padx=3)
+        ttk.Button(action_frame, text="Delete",
+                  command=self._delete_selected_task).pack(side='left', padx=3)
+        ttk.Button(action_frame, text="Progress",
+                  command=self._update_task_progress).pack(side='left', padx=3)
         ttk.Button(action_frame, text="Duplicate",
-                  command=self._duplicate_selected_task).pack(side='left', padx=5)
+                  command=self._duplicate_selected_task).pack(side='left', padx=3)
         ttk.Button(action_frame, text="Snooze",
-                  command=self._snooze_selected_task).pack(side='left', padx=5)
+                  command=self._snooze_selected_task).pack(side='left', padx=3)
         ttk.Button(action_frame, text="Focus",
-                  command=self._focus_on_task).pack(side='left', padx=5)
+                  command=self._focus_on_task).pack(side='left', padx=3)
+        ttk.Button(action_frame, text="Expand All",
+                  command=self._expand_all_groups).pack(side='right', padx=3)
+        ttk.Button(action_frame, text="Collapse All",
+                  command=self._collapse_all_groups).pack(side='right', padx=3)
+
+    def _set_category_filter(self, category: str):
+        """Set category filter from quick filter buttons"""
+        self.filter_class_var.set(category)
+        self._refresh_task_list()
+
+    def _sort_by_column(self, column: str):
+        """Sort tasks by clicking column header"""
+        self.sort_var.set(column)
+        self._refresh_task_list()
+
+    def _expand_all_groups(self):
+        """Expand all category groups"""
+        for item in self.task_tree.get_children():
+            self.task_tree.item(item, open=True)
+
+    def _collapse_all_groups(self):
+        """Collapse all category groups"""
+        for item in self.task_tree.get_children():
+            self.task_tree.item(item, open=False)
 
     def _create_backtrack_tab(self):
         """Create the backtrack/ideas tab"""
@@ -1501,14 +1584,50 @@ class PersonalTracker(tk.Tk):
         if self.filter_imp_var.get() != "All":
             filters['importance'] = self.filter_imp_var.get()
 
-        # Get and display tasks
+        # Get tasks
         tasks = self.data_manager.get_tasks(filters if filters else None)
 
-        # Sort by importance then due date
+        # Sort tasks based on selected sort option
+        sort_by = self.sort_var.get()
         importance_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-        tasks.sort(key=lambda t: (importance_order.get(t.get('importance', 'Medium'), 2),
-                                  t.get('due_date') or '9999'))
 
+        if sort_by == "importance":
+            tasks.sort(key=lambda t: (importance_order.get(t.get('importance', 'Medium'), 2),
+                                      t.get('due_date') or '9999'))
+        elif sort_by == "due_date":
+            tasks.sort(key=lambda t: (t.get('due_date') or '9999',
+                                      importance_order.get(t.get('importance', 'Medium'), 2)))
+        elif sort_by == "progress":
+            tasks.sort(key=lambda t: (-t.get('progress', 0),
+                                      importance_order.get(t.get('importance', 'Medium'), 2)))
+        elif sort_by == "name":
+            tasks.sort(key=lambda t: t.get('name', '').lower())
+        elif sort_by == "category":
+            tasks.sort(key=lambda t: (t.get('classification', 'Other'),
+                                      importance_order.get(t.get('importance', 'Medium'), 2)))
+
+        # Display based on view mode
+        view_mode = self.view_mode_var.get()
+
+        if view_mode == "grouped":
+            self._display_grouped_tasks(tasks, importance_order)
+        else:
+            self._display_list_tasks(tasks)
+
+        # Update quick stats
+        stats = self.data_manager.get_statistics()
+        self.quick_stats_label.config(
+            text=f"Active: {stats['active_tasks']} | Due Today: {stats['due_today']} | Overdue: {stats['overdue']}"
+        )
+
+        # Update category overview panel
+        self._update_category_overview()
+
+        # Update quick filter button counts
+        self._update_filter_button_counts()
+
+    def _display_list_tasks(self, tasks: List[Dict]):
+        """Display tasks in flat list view"""
         for task in tasks:
             due_display = self._format_due_date(task)
             values = (
@@ -1521,11 +1640,145 @@ class PersonalTracker(tk.Tk):
             self.task_tree.insert('', 'end', iid=task['id'], values=values,
                                  tags=(task.get('importance', 'Medium'),))
 
-        # Update quick stats
-        stats = self.data_manager.get_statistics()
-        self.quick_stats_label.config(
-            text=f"Active: {stats['active_tasks']} | Due Today: {stats['due_today']} | Overdue: {stats['overdue']}"
-        )
+    def _display_grouped_tasks(self, tasks: List[Dict], importance_order: Dict):
+        """Display tasks grouped by category"""
+        # Group tasks by category
+        grouped = {}
+        for task in tasks:
+            cat = task.get('classification', 'Other')
+            if cat not in grouped:
+                grouped[cat] = []
+            grouped[cat].append(task)
+
+        # Sort categories by classification order
+        cat_order = {cat: i for i, cat in enumerate(self.CLASSIFICATIONS)}
+
+        # Insert groups
+        for cat in sorted(grouped.keys(), key=lambda c: cat_order.get(c, 999)):
+            cat_tasks = grouped[cat]
+
+            # Count stats for this category
+            total = len(cat_tasks)
+            avg_progress = sum(t.get('progress', 0) for t in cat_tasks) // total if total > 0 else 0
+            critical_count = sum(1 for t in cat_tasks if t.get('importance') == 'Critical')
+
+            # Create group header
+            header_text = f"{cat} ({total} tasks, {avg_progress}% avg)"
+            if critical_count > 0:
+                header_text = f"{cat} ({total} tasks, {critical_count} critical)"
+
+            group_id = f"_group_{cat.replace(' ', '_')}"
+            self.task_tree.insert('', 'end', iid=group_id, text='',
+                                 values=(header_text, '', '', '', ''),
+                                 tags=('group_header',), open=True)
+
+            # Insert tasks under group
+            for task in cat_tasks:
+                due_display = self._format_due_date(task)
+                values = (
+                    task.get('name', ''),
+                    '',  # Don't repeat category
+                    task.get('importance', ''),
+                    due_display,
+                    f"{task.get('progress', 0)}%"
+                )
+                self.task_tree.insert(group_id, 'end', iid=task['id'], values=values,
+                                     tags=(task.get('importance', 'Medium'),))
+
+    def _update_category_overview(self):
+        """Update the category overview panel"""
+        all_tasks = self.data_manager.get_tasks()
+
+        # Calculate stats per category
+        cat_stats = {}
+        for cat in self.CLASSIFICATIONS:
+            cat_stats[cat] = {'total': 0, 'progress_sum': 0, 'critical': 0, 'overdue': 0}
+
+        today = datetime.now().date()
+        for task in all_tasks:
+            cat = task.get('classification', 'Other')
+            if cat not in cat_stats:
+                cat_stats[cat] = {'total': 0, 'progress_sum': 0, 'critical': 0, 'overdue': 0}
+
+            cat_stats[cat]['total'] += 1
+            cat_stats[cat]['progress_sum'] += task.get('progress', 0)
+
+            if task.get('importance') == 'Critical':
+                cat_stats[cat]['critical'] += 1
+
+            # Check overdue
+            if task.get('due_type') == 'specific_date' and task.get('due_date'):
+                try:
+                    due = datetime.fromisoformat(task['due_date']).date()
+                    if due < today:
+                        cat_stats[cat]['overdue'] += 1
+                except (ValueError, TypeError):
+                    pass
+
+        # Build overview text
+        overview_lines = []
+        overview_lines.append("=" * 23)
+        overview_lines.append("  CATEGORY OVERVIEW")
+        overview_lines.append("=" * 23)
+        overview_lines.append("")
+
+        total_all = 0
+        for cat in self.CLASSIFICATIONS:
+            stats = cat_stats[cat]
+            if stats['total'] == 0:
+                continue
+
+            total_all += stats['total']
+            avg = stats['progress_sum'] // stats['total'] if stats['total'] > 0 else 0
+
+            # Category name (shortened)
+            short_cat = cat.replace(' Goals', '').replace(' ', '')[:12]
+            overview_lines.append(f"{short_cat}:")
+            overview_lines.append(f"  Tasks: {stats['total']}")
+            overview_lines.append(f"  Progress: {avg}%")
+
+            if stats['critical'] > 0:
+                overview_lines.append(f"  Critical: {stats['critical']}")
+            if stats['overdue'] > 0:
+                overview_lines.append(f"  Overdue: {stats['overdue']}")
+
+            # Progress bar
+            filled = avg // 10
+            bar = "[" + "#" * filled + "-" * (10 - filled) + "]"
+            overview_lines.append(f"  {bar}")
+            overview_lines.append("")
+
+        overview_lines.append("-" * 23)
+        overview_lines.append(f"Total Active: {total_all}")
+
+        # Update text widget
+        self.category_overview.config(state='normal')
+        self.category_overview.delete('1.0', tk.END)
+        self.category_overview.insert('1.0', '\n'.join(overview_lines))
+        self.category_overview.config(state='disabled')
+
+    def _update_filter_button_counts(self):
+        """Update quick filter buttons with task counts"""
+        all_tasks = self.data_manager.get_tasks()
+
+        # Count tasks per category
+        cat_counts = {"All": len(all_tasks)}
+        for cat in self.CLASSIFICATIONS:
+            cat_counts[cat] = 0
+
+        for task in all_tasks:
+            cat = task.get('classification', 'Other')
+            if cat in cat_counts:
+                cat_counts[cat] += 1
+
+        # Update button text
+        if "All" in self.category_buttons:
+            self.category_buttons["All"].config(text=f"All ({cat_counts['All']})")
+
+        for cat in self.CLASSIFICATIONS:
+            if cat in self.category_buttons and cat_counts[cat] > 0:
+                short_name = cat.split()[0][:4]
+                self.category_buttons[cat].config(text=f"{short_name}({cat_counts[cat]})")
 
     def _format_due_date(self, task: Dict) -> str:
         """Format due date for display"""
@@ -1559,7 +1812,7 @@ class PersonalTracker(tk.Tk):
     def _show_task_context_menu(self, event):
         """Show context menu for tasks"""
         item = self.task_tree.identify_row(event.y)
-        if item:
+        if item and not item.startswith('_group_'):
             self.task_tree.selection_set(item)
             self.task_context_menu.tk_popup(event.x_root, event.y_root)
 
@@ -1571,6 +1824,11 @@ class PersonalTracker(tk.Tk):
             return None
 
         task_id = selection[0]
+        # Ignore group headers
+        if task_id.startswith('_group_'):
+            messagebox.showinfo("Info", "Please select a task, not a category header")
+            return None
+
         for task in self.data_manager.get_tasks():
             if task['id'] == task_id:
                 return task
