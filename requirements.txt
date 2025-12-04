@@ -1,0 +1,15 @@
+# Personal Task Tracker Requirements
+# Python 3.7+ required
+
+# Core dependencies (included in Python standard library)
+# tkinter - GUI framework (usually pre-installed with Python)
+# json - data persistence
+# csv - export functionality
+# uuid - unique identifiers
+# datetime - date/time handling
+
+# Optional dependencies for enhanced functionality
+# None required - uses only standard library!
+
+# For creating standalone executables (optional):
+# pyinstaller>=5.0
