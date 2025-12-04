@@ -9,7 +9,11 @@ Features:
 - Statistics dashboard
 - Data persistence
 - Search and filtering
-- Export functionality
+- Export/Import functionality
+- Pomodoro Timer for focused work
+- Dark/Light theme toggle
+- Task duplication and snoozing
+- Daily review and backup
 """
 
 import tkinter as tk
@@ -18,8 +22,16 @@ from datetime import datetime, timedelta
 import json
 import os
 import uuid
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Callable
 import csv
+import shutil
+import threading
+try:
+    # Optional: for sound notifications
+    import winsound
+    HAS_SOUND = True
+except ImportError:
+    HAS_SOUND = False
 
 
 # ============================================================================
@@ -261,6 +273,129 @@ class DataManager:
             messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
             return False
 
+    def import_from_csv(self, filename: str) -> tuple[int, int]:
+        """Import tasks from CSV. Returns (success_count, error_count)."""
+        success = 0
+        errors = 0
+        try:
+            with open(filename, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        task = {
+                            'name': row.get('Name', row.get('name', '')),
+                            'classification': row.get('Classification', row.get('classification', 'Other')),
+                            'importance': row.get('Importance', row.get('importance', 'Medium')),
+                            'due_type': row.get('Due Type', row.get('due_type', 'none')),
+                            'due_date': row.get('Due Date', row.get('due_date', None)) or None,
+                            'progress': int(row.get('Progress', row.get('progress', 0)) or 0),
+                            'notes': row.get('Notes', row.get('notes', '')),
+                            'recurring': False,
+                            'status': 'active'
+                        }
+                        if task['name']:
+                            self.add_task(task)
+                            success += 1
+                    except (ValueError, KeyError):
+                        errors += 1
+        except (IOError, OSError) as e:
+            messagebox.showerror("Import Error", f"Failed to import CSV: {e}")
+        return success, errors
+
+    def create_backup(self, backup_dir: str = None) -> Optional[str]:
+        """Create a backup of the data file. Returns backup path or None."""
+        if backup_dir is None:
+            backup_dir = os.path.dirname(self.data_file)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"tracker_backup_{timestamp}.json"
+        backup_path = os.path.join(backup_dir, backup_name)
+
+        try:
+            shutil.copy2(self.data_file, backup_path)
+            return backup_path
+        except (IOError, OSError) as e:
+            messagebox.showerror("Backup Error", f"Failed to create backup: {e}")
+            return None
+
+    def restore_backup(self, backup_path: str) -> bool:
+        """Restore data from a backup file."""
+        try:
+            with open(backup_path, 'r') as f:
+                data = json.load(f)
+                # Validate structure
+                if 'tasks' in data and 'backtrack' in data:
+                    self.data = data
+                    self.save_data()
+                    return True
+                else:
+                    messagebox.showerror("Restore Error", "Invalid backup file format")
+                    return False
+        except (json.JSONDecodeError, IOError) as e:
+            messagebox.showerror("Restore Error", f"Failed to restore: {e}")
+            return False
+
+    def get_daily_summary(self) -> Dict:
+        """Get summary of today's tasks and completed tasks."""
+        today = datetime.now().date()
+        today_str = today.strftime("%Y-%m-%d")
+
+        summary = {
+            'due_today': [],
+            'overdue': [],
+            'completed_today': [],
+            'in_progress': []
+        }
+
+        # Check active tasks
+        for task in self.data['tasks']:
+            if task.get('due_type') == 'specific_date' and task.get('due_date'):
+                try:
+                    due = datetime.fromisoformat(task['due_date']).date()
+                    if due == today:
+                        summary['due_today'].append(task)
+                    elif due < today:
+                        summary['overdue'].append(task)
+                except (ValueError, TypeError):
+                    pass
+
+            if task.get('progress', 0) > 0 and task.get('progress', 0) < 100:
+                summary['in_progress'].append(task)
+
+        # Check completed today
+        for task in self.data.get('completed_history', []):
+            if task.get('completed_at'):
+                try:
+                    completed = datetime.fromisoformat(task['completed_at']).date()
+                    if completed == today:
+                        summary['completed_today'].append(task)
+                except (ValueError, TypeError):
+                    pass
+
+        return summary
+
+    def snooze_task(self, task_id: str, days: int) -> bool:
+        """Snooze a task by the specified number of days."""
+        for task in self.data['tasks']:
+            if task['id'] == task_id:
+                if task.get('due_date'):
+                    try:
+                        current_due = datetime.fromisoformat(task['due_date'])
+                        new_due = current_due + timedelta(days=days)
+                        task['due_date'] = new_due.isoformat()
+                    except (ValueError, TypeError):
+                        new_due = datetime.now() + timedelta(days=days)
+                        task['due_date'] = new_due.isoformat()
+                else:
+                    new_due = datetime.now() + timedelta(days=days)
+                    task['due_date'] = new_due.isoformat()
+                    task['due_type'] = 'specific_date'
+
+                task['updated_at'] = datetime.now().isoformat()
+                self.save_data()
+                return True
+        return False
+
 
 # ============================================================================
 # Custom Widgets
@@ -486,6 +621,262 @@ class ProgressBar(ttk.Frame):
         return self.progress_var.get()
 
 
+class PomodoroTimer(tk.Toplevel):
+    """Pomodoro Timer for focused work sessions"""
+
+    def __init__(self, parent, task_name: str = "Focus Session",
+                 work_minutes: int = 25, break_minutes: int = 5,
+                 on_complete: Callable = None):
+        super().__init__(parent)
+        self.title("Pomodoro Timer")
+        self.geometry("350x300")
+        self.resizable(False, False)
+        self.transient(parent)
+
+        self.task_name = task_name
+        self.work_seconds = work_minutes * 60
+        self.break_seconds = break_minutes * 60
+        self.on_complete = on_complete
+
+        self.remaining = self.work_seconds
+        self.is_running = False
+        self.is_break = False
+        self.sessions_completed = 0
+        self.timer_id = None
+
+        self._create_widgets()
+
+        # Center the dialog
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _create_widgets(self):
+        main_frame = ttk.Frame(self, padding="20")
+        main_frame.pack(fill='both', expand=True)
+
+        # Task name
+        self.task_label = ttk.Label(main_frame, text=self.task_name,
+                                    font=('Arial', 12, 'bold'), wraplength=300)
+        self.task_label.pack(pady=(0, 10))
+
+        # Mode indicator
+        self.mode_label = ttk.Label(main_frame, text="WORK TIME",
+                                    font=('Arial', 10), foreground='#FF4444')
+        self.mode_label.pack()
+
+        # Timer display
+        self.timer_label = ttk.Label(main_frame, text="25:00",
+                                     font=('Arial', 48, 'bold'))
+        self.timer_label.pack(pady=20)
+
+        # Progress bar
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress = ttk.Progressbar(main_frame, variable=self.progress_var,
+                                        maximum=100, length=250)
+        self.progress.pack(pady=10)
+
+        # Sessions counter
+        self.sessions_label = ttk.Label(main_frame, text="Sessions: 0",
+                                        font=('Arial', 10))
+        self.sessions_label.pack()
+
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(pady=15)
+
+        self.start_btn = ttk.Button(btn_frame, text="Start",
+                                    command=self._toggle_timer, width=10)
+        self.start_btn.pack(side='left', padx=5)
+
+        ttk.Button(btn_frame, text="Reset",
+                  command=self._reset_timer, width=10).pack(side='left', padx=5)
+
+        ttk.Button(btn_frame, text="Skip",
+                  command=self._skip_phase, width=10).pack(side='left', padx=5)
+
+    def _update_display(self):
+        """Update the timer display"""
+        mins = self.remaining // 60
+        secs = self.remaining % 60
+        self.timer_label.config(text=f"{mins:02d}:{secs:02d}")
+
+        # Update progress
+        total = self.break_seconds if self.is_break else self.work_seconds
+        progress = ((total - self.remaining) / total) * 100
+        self.progress_var.set(progress)
+
+    def _toggle_timer(self):
+        """Start or pause the timer"""
+        if self.is_running:
+            self.is_running = False
+            self.start_btn.config(text="Resume")
+            if self.timer_id:
+                self.after_cancel(self.timer_id)
+        else:
+            self.is_running = True
+            self.start_btn.config(text="Pause")
+            self._tick()
+
+    def _tick(self):
+        """Timer tick"""
+        if self.is_running and self.remaining > 0:
+            self.remaining -= 1
+            self._update_display()
+            self.timer_id = self.after(1000, self._tick)
+        elif self.remaining <= 0:
+            self._phase_complete()
+
+    def _phase_complete(self):
+        """Handle phase completion"""
+        self.is_running = False
+        self.start_btn.config(text="Start")
+
+        # Play notification sound if available
+        if HAS_SOUND:
+            try:
+                winsound.MessageBeep()
+            except Exception:
+                pass
+
+        if self.is_break:
+            # Break finished, back to work
+            self.is_break = False
+            self.remaining = self.work_seconds
+            self.mode_label.config(text="WORK TIME", foreground='#FF4444')
+            messagebox.showinfo("Break Over", "Break time is over! Ready for another work session?")
+        else:
+            # Work finished, time for break
+            self.sessions_completed += 1
+            self.sessions_label.config(text=f"Sessions: {self.sessions_completed}")
+            self.is_break = True
+            self.remaining = self.break_seconds
+            self.mode_label.config(text="BREAK TIME", foreground='#4A90D9')
+
+            if self.on_complete:
+                self.on_complete()
+
+            # Long break every 4 sessions
+            if self.sessions_completed % 4 == 0:
+                self.remaining = self.break_seconds * 3  # 15 min break
+                messagebox.showinfo("Great Work!",
+                    f"Completed {self.sessions_completed} sessions!\n"
+                    "Take a longer 15-minute break.")
+            else:
+                messagebox.showinfo("Session Complete",
+                    "Work session complete! Time for a short break.")
+
+        self._update_display()
+
+    def _reset_timer(self):
+        """Reset the current phase"""
+        self.is_running = False
+        if self.timer_id:
+            self.after_cancel(self.timer_id)
+        self.start_btn.config(text="Start")
+        self.remaining = self.break_seconds if self.is_break else self.work_seconds
+        self._update_display()
+
+    def _skip_phase(self):
+        """Skip current phase"""
+        self.remaining = 0
+        self._phase_complete()
+
+    def _on_close(self):
+        """Handle window close"""
+        if self.timer_id:
+            self.after_cancel(self.timer_id)
+        self.destroy()
+
+
+class QuickAddDialog(tk.Toplevel):
+    """Quick add dialog for fast task entry"""
+
+    def __init__(self, parent, classifications: List[str], on_save: Callable):
+        super().__init__(parent)
+        self.title("Quick Add Task")
+        self.geometry("400x180")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self.on_save = on_save
+        self.classifications = classifications
+
+        self._create_widgets()
+
+        # Center
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+
+        # Focus on name entry
+        self.name_entry.focus_set()
+
+        # Bind Enter to save
+        self.bind('<Return>', lambda e: self._save())
+        self.bind('<Escape>', lambda e: self.destroy())
+
+    def _create_widgets(self):
+        frame = ttk.Frame(self, padding="15")
+        frame.pack(fill='both', expand=True)
+
+        # Task name
+        ttk.Label(frame, text="Task Name:").grid(row=0, column=0, sticky='w', pady=5)
+        self.name_entry = ttk.Entry(frame, width=40)
+        self.name_entry.grid(row=0, column=1, columnspan=2, pady=5, sticky='ew')
+
+        # Category
+        ttk.Label(frame, text="Category:").grid(row=1, column=0, sticky='w', pady=5)
+        self.class_var = tk.StringVar(value="Daily Goals")
+        ttk.Combobox(frame, textvariable=self.class_var, values=self.classifications,
+                    state='readonly', width=20).grid(row=1, column=1, pady=5, sticky='w')
+
+        # Importance
+        ttk.Label(frame, text="Importance:").grid(row=2, column=0, sticky='w', pady=5)
+        self.imp_var = tk.StringVar(value="Medium")
+        imp_frame = ttk.Frame(frame)
+        imp_frame.grid(row=2, column=1, columnspan=2, sticky='w', pady=5)
+        for imp in ["Critical", "High", "Medium", "Low"]:
+            ttk.Radiobutton(imp_frame, text=imp, variable=self.imp_var,
+                           value=imp).pack(side='left', padx=3)
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=3, column=0, columnspan=3, pady=15)
+
+        ttk.Button(btn_frame, text="Add Task", command=self._save).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side='left', padx=5)
+
+        frame.columnconfigure(1, weight=1)
+
+    def _save(self):
+        """Save the task"""
+        name = self.name_entry.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Task name is required")
+            return
+
+        task = {
+            'name': name,
+            'classification': self.class_var.get(),
+            'importance': self.imp_var.get(),
+            'due_type': 'none',
+            'due_date': None,
+            'progress': 0,
+            'notes': '',
+            'recurring': False,
+            'status': 'active'
+        }
+
+        self.on_save(task)
+        self.destroy()
+
+
 # ============================================================================
 # Main Application
 # ============================================================================
@@ -517,6 +908,24 @@ class PersonalTracker(tk.Tk):
 
     DUE_TYPES = ["None", "Ongoing", "Specific Date"]
 
+    # Theme colors
+    THEMES = {
+        'light': {
+            'bg': '#ffffff',
+            'fg': '#000000',
+            'select_bg': '#4a90d9',
+            'tree_bg': '#ffffff',
+            'frame_bg': '#f0f0f0'
+        },
+        'dark': {
+            'bg': '#2d2d2d',
+            'fg': '#ffffff',
+            'select_bg': '#4a90d9',
+            'tree_bg': '#3d3d3d',
+            'frame_bg': '#252525'
+        }
+    }
+
     def __init__(self):
         super().__init__()
 
@@ -526,6 +935,9 @@ class PersonalTracker(tk.Tk):
 
         # Initialize data manager
         self.data_manager = DataManager()
+
+        # Current theme
+        self.current_theme = self.data_manager.data.get('settings', {}).get('theme', 'light')
 
         # Configure styles
         self._configure_styles()
@@ -538,6 +950,9 @@ class PersonalTracker(tk.Tk):
         self._refresh_task_list()
         self._refresh_backtrack_list()
         self._update_statistics()
+
+        # Apply theme
+        self._apply_theme()
 
         # Bind window close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -567,15 +982,40 @@ class PersonalTracker(tk.Tk):
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Quick Add Task (Ctrl+Shift+N)", command=self._show_quick_add)
+        file_menu.add_separator()
         file_menu.add_command(label="Export to CSV", command=self._export_csv)
+        file_menu.add_command(label="Import from CSV", command=self._import_csv)
+        file_menu.add_separator()
+        file_menu.add_command(label="Create Backup", command=self._create_backup)
+        file_menu.add_command(label="Restore Backup", command=self._restore_backup)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
+
+        # Edit menu
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Duplicate Task", command=self._duplicate_selected_task)
+        edit_menu.add_command(label="Snooze Task", command=self._snooze_selected_task)
 
         # View menu
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
         view_menu.add_command(label="Refresh", command=self._refresh_all)
         view_menu.add_command(label="Statistics", command=self._show_statistics_dialog)
+        view_menu.add_command(label="Daily Review", command=self._show_daily_review)
+        view_menu.add_separator()
+        self.theme_var = tk.StringVar(value=self.current_theme)
+        view_menu.add_radiobutton(label="Light Theme", variable=self.theme_var,
+                                  value='light', command=self._toggle_theme)
+        view_menu.add_radiobutton(label="Dark Theme", variable=self.theme_var,
+                                  value='dark', command=self._toggle_theme)
+
+        # Tools menu
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Pomodoro Timer", command=self._start_pomodoro)
+        tools_menu.add_command(label="Focus on Task", command=self._focus_on_task)
 
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -702,6 +1142,10 @@ class PersonalTracker(tk.Tk):
         self.task_context_menu.add_command(label="Update Progress",
                                           command=self._update_task_progress)
         self.task_context_menu.add_separator()
+        self.task_context_menu.add_command(label="Duplicate", command=self._duplicate_selected_task)
+        self.task_context_menu.add_command(label="Snooze", command=self._snooze_selected_task)
+        self.task_context_menu.add_command(label="Focus (Pomodoro)", command=self._focus_on_task)
+        self.task_context_menu.add_separator()
         self.task_context_menu.add_command(label="Delete", command=self._delete_selected_task)
 
         self.task_tree.bind('<Button-3>', self._show_task_context_menu)
@@ -718,6 +1162,12 @@ class PersonalTracker(tk.Tk):
                   command=self._delete_selected_task).pack(side='left', padx=5)
         ttk.Button(action_frame, text="Update Progress",
                   command=self._update_task_progress).pack(side='left', padx=5)
+        ttk.Button(action_frame, text="Duplicate",
+                  command=self._duplicate_selected_task).pack(side='left', padx=5)
+        ttk.Button(action_frame, text="Snooze",
+                  command=self._snooze_selected_task).pack(side='left', padx=5)
+        ttk.Button(action_frame, text="Focus",
+                  command=self._focus_on_task).pack(side='left', padx=5)
 
     def _create_backtrack_tab(self):
         """Create the backtrack/ideas tab"""
@@ -1376,32 +1826,291 @@ class PersonalTracker(tk.Tk):
     def _show_about(self):
         """Show about dialog"""
         messagebox.showinfo("About Personal Task Tracker",
-            "Personal Task Tracker v1.0\n\n"
+            "Personal Task Tracker v2.0\n\n"
             "A comprehensive task management application\n\n"
             "Features:\n"
-            "- Task management with priorities\n"
-            "- Category-based organization\n"
-            "- Progress tracking\n"
+            "- Task management with priorities & categories\n"
+            "- Progress tracking & streaks\n"
             "- Backtrack ideas storage\n"
             "- Statistics dashboard\n"
-            "- Data persistence\n"
-            "- Export to CSV"
+            "- Pomodoro Timer for focus\n"
+            "- Dark/Light theme\n"
+            "- Import/Export CSV\n"
+            "- Backup & Restore\n"
+            "- Task snoozing & duplication\n"
+            "- Daily review summary"
         )
 
     def _show_shortcuts(self):
         """Show keyboard shortcuts"""
         messagebox.showinfo("Keyboard Shortcuts",
             "Keyboard Shortcuts:\n\n"
+            "Ctrl+N: New task\n"
+            "Ctrl+Shift+N: Quick add task\n"
+            "Delete: Delete selected item\n"
             "Double-click: Edit task\n"
-            "Right-click: Context menu\n"
-            "Ctrl+N: New task (in Tasks tab)\n"
-            "Delete: Delete selected item"
+            "Right-click: Context menu\n\n"
+            "Pomodoro Timer:\n"
+            "Space: Start/Pause\n"
+            "R: Reset timer"
         )
 
     def _on_close(self):
         """Handle window close"""
         self.data_manager.save_data()
         self.destroy()
+
+    # ========================================================================
+    # New Features
+    # ========================================================================
+
+    def _apply_theme(self):
+        """Apply the current theme to the application"""
+        theme = self.THEMES.get(self.current_theme, self.THEMES['light'])
+
+        # Configure main window
+        self.configure(bg=theme['frame_bg'])
+
+        # Update ttk styles for theme
+        style = ttk.Style()
+
+        if self.current_theme == 'dark':
+            style.configure('TFrame', background=theme['frame_bg'])
+            style.configure('TLabel', background=theme['frame_bg'], foreground=theme['fg'])
+            style.configure('TLabelframe', background=theme['frame_bg'])
+            style.configure('TLabelframe.Label', background=theme['frame_bg'], foreground=theme['fg'])
+            style.configure('TNotebook', background=theme['frame_bg'])
+            style.configure('TNotebook.Tab', background=theme['bg'], foreground=theme['fg'])
+            style.map('TNotebook.Tab', background=[('selected', theme['select_bg'])])
+
+            # Configure Treeview
+            style.configure('Treeview',
+                          background=theme['tree_bg'],
+                          foreground=theme['fg'],
+                          fieldbackground=theme['tree_bg'])
+            style.map('Treeview', background=[('selected', theme['select_bg'])])
+        else:
+            # Reset to light theme defaults
+            style.configure('TFrame', background='')
+            style.configure('TLabel', background='', foreground='')
+            style.configure('TLabelframe', background='')
+            style.configure('TLabelframe.Label', background='', foreground='')
+            style.configure('Treeview', background='white', foreground='black',
+                          fieldbackground='white')
+
+    def _toggle_theme(self):
+        """Toggle between light and dark theme"""
+        self.current_theme = self.theme_var.get()
+        self.data_manager.data['settings']['theme'] = self.current_theme
+        self.data_manager.save_data()
+        self._apply_theme()
+
+    def _show_quick_add(self):
+        """Show quick add dialog"""
+        def on_save(task):
+            self.data_manager.add_task(task)
+            self._refresh_task_list()
+            self._update_statistics()
+
+        QuickAddDialog(self, self.CLASSIFICATIONS, on_save)
+
+    def _duplicate_selected_task(self):
+        """Duplicate the selected task"""
+        task = self._get_selected_task()
+        if task:
+            new_task = task.copy()
+            new_task.pop('id', None)
+            new_task.pop('created_at', None)
+            new_task.pop('updated_at', None)
+            new_task['name'] = f"Copy of {task['name']}"
+            new_task['progress'] = 0
+            self.data_manager.add_task(new_task)
+            self._refresh_task_list()
+            self._update_statistics()
+            messagebox.showinfo("Success", "Task duplicated!")
+
+    def _snooze_selected_task(self):
+        """Snooze the selected task"""
+        task = self._get_selected_task()
+        if not task:
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Snooze Task")
+        dialog.geometry("300x180")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(fill='both', expand=True)
+
+        task_name = task.get('name', 'Task')
+        display_name = task_name[:30] + "..." if len(task_name) > 30 else task_name
+        ttk.Label(frame, text=f"Snooze: {display_name}",
+                 font=('Arial', 10, 'bold')).pack(pady=(0, 15))
+
+        ttk.Label(frame, text="Postpone by:").pack()
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=15)
+
+        def snooze(days):
+            self.data_manager.snooze_task(task['id'], days)
+            dialog.destroy()
+            self._refresh_task_list()
+            messagebox.showinfo("Snoozed", f"Task snoozed by {days} day(s)")
+
+        ttk.Button(btn_frame, text="1 Day", command=lambda: snooze(1), width=8).pack(side='left', padx=3)
+        ttk.Button(btn_frame, text="3 Days", command=lambda: snooze(3), width=8).pack(side='left', padx=3)
+        ttk.Button(btn_frame, text="1 Week", command=lambda: snooze(7), width=8).pack(side='left', padx=3)
+
+        btn_frame2 = ttk.Frame(frame)
+        btn_frame2.pack()
+        ttk.Button(btn_frame2, text="2 Weeks", command=lambda: snooze(14), width=8).pack(side='left', padx=3)
+        ttk.Button(btn_frame2, text="1 Month", command=lambda: snooze(30), width=8).pack(side='left', padx=3)
+        ttk.Button(btn_frame2, text="Cancel", command=dialog.destroy, width=8).pack(side='left', padx=3)
+
+    def _start_pomodoro(self):
+        """Start a general Pomodoro timer"""
+        PomodoroTimer(self, "Focus Session")
+
+    def _focus_on_task(self):
+        """Start Pomodoro timer for selected task"""
+        task = self._get_selected_task()
+        if task:
+            def on_complete():
+                # Increment progress by 10% per session
+                current = task.get('progress', 0)
+                new_progress = min(100, current + 10)
+                self.data_manager.update_task(task['id'], {'progress': new_progress})
+                self._refresh_task_list()
+
+            PomodoroTimer(self, task.get('name', 'Task'), on_complete=on_complete)
+
+    def _import_csv(self):
+        """Import tasks from CSV"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Import Tasks from CSV"
+        )
+        if filename:
+            success, errors = self.data_manager.import_from_csv(filename)
+            self._refresh_task_list()
+            self._update_statistics()
+            messagebox.showinfo("Import Complete",
+                f"Imported {success} tasks successfully.\n"
+                f"Errors: {errors}")
+
+    def _create_backup(self):
+        """Create a backup of all data"""
+        backup_dir = filedialog.askdirectory(title="Select Backup Location")
+        if backup_dir:
+            backup_path = self.data_manager.create_backup(backup_dir)
+            if backup_path:
+                messagebox.showinfo("Backup Created", f"Backup saved to:\n{backup_path}")
+
+    def _restore_backup(self):
+        """Restore data from a backup"""
+        if not messagebox.askyesno("Confirm Restore",
+            "This will replace all current data with the backup.\n"
+            "Are you sure you want to continue?"):
+            return
+
+        filename = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Select Backup File"
+        )
+        if filename:
+            if self.data_manager.restore_backup(filename):
+                self._refresh_all()
+                messagebox.showinfo("Restore Complete", "Data restored successfully!")
+
+    def _show_daily_review(self):
+        """Show daily review summary"""
+        summary = self.data_manager.get_daily_summary()
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Daily Review")
+        dialog.geometry("500x450")
+        dialog.resizable(True, True)
+        dialog.transient(self)
+
+        # Center
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill='both', expand=True)
+
+        # Header
+        today = datetime.now().strftime("%A, %B %d, %Y")
+        ttk.Label(main_frame, text=f"Daily Review - {today}",
+                 font=('Arial', 14, 'bold')).pack(pady=(0, 15))
+
+        # Create text widget for summary
+        text = tk.Text(main_frame, wrap='word', font=('Arial', 10), height=20)
+        scrollbar = ttk.Scrollbar(main_frame, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+
+        text.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        # Build summary text
+        content = []
+
+        content.append("=" * 40)
+        content.append("COMPLETED TODAY")
+        content.append("=" * 40)
+        if summary['completed_today']:
+            for task in summary['completed_today']:
+                content.append(f"  [DONE] {task.get('name', 'Unknown')}")
+        else:
+            content.append("  No tasks completed today yet.")
+        content.append("")
+
+        content.append("=" * 40)
+        content.append("DUE TODAY")
+        content.append("=" * 40)
+        if summary['due_today']:
+            for task in summary['due_today']:
+                content.append(f"  [{task.get('importance', 'Medium')}] {task.get('name', 'Unknown')}")
+        else:
+            content.append("  No tasks due today.")
+        content.append("")
+
+        content.append("=" * 40)
+        content.append("OVERDUE")
+        content.append("=" * 40)
+        if summary['overdue']:
+            for task in summary['overdue']:
+                content.append(f"  [!] {task.get('name', 'Unknown')}")
+        else:
+            content.append("  No overdue tasks!")
+        content.append("")
+
+        content.append("=" * 40)
+        content.append("IN PROGRESS")
+        content.append("=" * 40)
+        if summary['in_progress']:
+            for task in summary['in_progress']:
+                content.append(f"  [{task.get('progress', 0)}%] {task.get('name', 'Unknown')}")
+        else:
+            content.append("  No tasks in progress.")
+
+        text.insert('1.0', '\n'.join(content))
+        text.configure(state='disabled')
+
+        # Close button
+        ttk.Button(main_frame, text="Close", command=dialog.destroy).pack(pady=15)
 
 
 # ============================================================================
@@ -1422,7 +2131,13 @@ def main():
 
     # Bind keyboard shortcuts
     app.bind('<Control-n>', lambda e: app._show_add_task_dialog())
+    app.bind('<Control-N>', lambda e: app._show_add_task_dialog())  # Caps lock support
+    app.bind('<Control-Shift-n>', lambda e: app._show_quick_add())
+    app.bind('<Control-Shift-N>', lambda e: app._show_quick_add())
     app.bind('<Delete>', handle_delete)
+    app.bind('<F5>', lambda e: app._refresh_all())
+    app.bind('<Control-d>', lambda e: app._duplicate_selected_task())
+    app.bind('<Control-p>', lambda e: app._start_pomodoro())
 
     app.mainloop()
 
