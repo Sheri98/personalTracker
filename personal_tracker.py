@@ -1554,6 +1554,10 @@ class PersonalTracker(tk.Tk):
                 self.data_manager.update_task(edit_task['id'], task_data)
             else:
                 self.data_manager.add_task(task_data)
+                # If promoting from backtrack, delete the idea now
+                if edit_task and edit_task.get('__promote_id__'):
+                    self.data_manager.delete_backtrack(edit_task['__promote_id__'])
+                    self._refresh_backtrack_list()
 
             dialog.destroy()
             self._refresh_task_list()
@@ -1742,8 +1746,9 @@ class PersonalTracker(tk.Tk):
             if stats['overdue'] > 0:
                 overview_lines.append(f"  Overdue: {stats['overdue']}")
 
-            # Progress bar
-            filled = avg // 10
+            # Progress bar (clamp to 0-100)
+            clamped_avg = max(0, min(100, avg))
+            filled = clamped_avg // 10
             bar = "[" + "#" * filled + "-" * (10 - filled) + "]"
             overview_lines.append(f"  {bar}")
             overview_lines.append("")
@@ -1776,9 +1781,13 @@ class PersonalTracker(tk.Tk):
             self.category_buttons["All"].config(text=f"All ({cat_counts['All']})")
 
         for cat in self.CLASSIFICATIONS:
-            if cat in self.category_buttons and cat_counts[cat] > 0:
+            if cat in self.category_buttons:
                 short_name = cat.split()[0][:4]
-                self.category_buttons[cat].config(text=f"{short_name}({cat_counts[cat]})")
+                if cat_counts[cat] > 0:
+                    self.category_buttons[cat].config(text=f"{short_name}({cat_counts[cat]})")
+                else:
+                    # Reset to just short name when no tasks
+                    self.category_buttons[cat].config(text=short_name)
 
     def _format_due_date(self, task: Dict) -> str:
         """Format due date for display"""
@@ -1807,6 +1816,10 @@ class PersonalTracker(tk.Tk):
 
     def _on_task_double_click(self, event):
         """Handle double-click on task"""
+        # Ignore double-click on group headers
+        item = self.task_tree.identify_row(event.y)
+        if item and item.startswith('_group_'):
+            return
         self._edit_selected_task()
 
     def _show_task_context_menu(self, event):
@@ -1816,17 +1829,23 @@ class PersonalTracker(tk.Tk):
             self.task_tree.selection_set(item)
             self.task_context_menu.tk_popup(event.x_root, event.y_root)
 
-    def _get_selected_task(self) -> Optional[Dict]:
-        """Get currently selected task"""
+    def _get_selected_task(self, silent: bool = False) -> Optional[Dict]:
+        """Get currently selected task
+
+        Args:
+            silent: If True, don't show message dialogs for errors
+        """
         selection = self.task_tree.selection()
         if not selection:
-            messagebox.showinfo("Info", "Please select a task first")
+            if not silent:
+                messagebox.showinfo("Info", "Please select a task first")
             return None
 
         task_id = selection[0]
         # Ignore group headers
         if task_id.startswith('_group_'):
-            messagebox.showinfo("Info", "Please select a task, not a category header")
+            if not silent:
+                messagebox.showinfo("Info", "Please select a task, not a category header")
             return None
 
         for task in self.data_manager.get_tasks():
@@ -1965,10 +1984,16 @@ class PersonalTracker(tk.Tk):
             return
 
         idea_id = selection[0]
-        idea = self.data_manager.promote_backtrack(idea_id)
+        # Find the idea without removing it yet
+        idea = None
+        for item in self.data_manager.get_backtrack():
+            if item['id'] == idea_id:
+                idea = item
+                break
 
         if idea:
             # Create task directly with pre-filled data from idea
+            # Store the idea ID so we can delete it after successful save
             task_data = {
                 'name': idea.get('text', ''),
                 'classification': idea.get('classification', 'Other'),
@@ -1978,12 +2003,11 @@ class PersonalTracker(tk.Tk):
                 'due_date': None,
                 'progress': 0,
                 'recurring': False,
-                'status': 'active'
+                'status': 'active',
+                '__promote_id__': idea_id  # Track which idea to delete on save
             }
-            # Pass None for edit_task to create a new task, but pre-fill the dialog
+            # Pass to dialog - idea will be deleted only when Save is clicked
             self._show_add_task_dialog_prefilled(task_data)
-            self._refresh_backtrack_list()
-            self._update_statistics()
 
     def _delete_backtrack_idea(self):
         """Delete a backtrack idea"""
@@ -2383,7 +2407,13 @@ def main():
         """Handle delete key based on current tab"""
         current_tab = app.notebook.index(app.notebook.select())
         if current_tab == 0:  # Tasks tab
-            app._delete_selected_task()
+            # Use silent mode to avoid showing message when group header selected
+            task = app._get_selected_task(silent=True)
+            if task:
+                if messagebox.askyesno("Confirm Delete", f"Delete task '{task['name']}'?"):
+                    app.data_manager.delete_task(task['id'])
+                    app._refresh_task_list()
+                    app._update_statistics()
         elif current_tab == 1:  # Backtrack tab
             app._delete_backtrack_idea()
 
