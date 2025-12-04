@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Data files (user-specific)
+tracker_data.json
+tracker_backup_*.json
+
+# OS files
+.DS_Store
+Thumbs.db
