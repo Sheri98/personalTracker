@@ -29,8 +29,13 @@ import csv
 class DataManager:
     """Handles data persistence using JSON files"""
 
-    def __init__(self, data_file: str = "tracker_data.json"):
-        self.data_file = data_file
+    def __init__(self, data_file: str = None):
+        # Store data file in same directory as script, not CWD
+        if data_file is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.data_file = os.path.join(script_dir, "tracker_data.json")
+        else:
+            self.data_file = data_file
         self.data = self._load_data()
 
     def _load_data(self) -> Dict[str, Any]:
@@ -38,8 +43,28 @@ class DataManager:
         if os.path.exists(self.data_file):
             try:
                 with open(self.data_file, 'r') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
+                    data = json.load(f)
+                    # Ensure all required keys exist (data migration)
+                    default = self._get_default_data()
+                    for key in default:
+                        if key not in data:
+                            data[key] = default[key]
+                    return data
+            except json.JSONDecodeError as e:
+                # Backup corrupted file and warn user
+                backup_file = self.data_file + ".corrupted"
+                try:
+                    os.rename(self.data_file, backup_file)
+                except OSError:
+                    pass
+                messagebox.showwarning(
+                    "Data Warning",
+                    f"Data file was corrupted and has been reset.\n"
+                    f"Backup saved to: {backup_file}"
+                )
+                return self._get_default_data()
+            except IOError as e:
+                messagebox.showwarning("Data Warning", f"Could not read data file: {e}")
                 return self._get_default_data()
         return self._get_default_data()
 
@@ -106,6 +131,10 @@ class DataManager:
 
     def _update_streak(self, classification: str) -> None:
         """Update streak for a classification"""
+        # Skip empty classifications
+        if not classification or not classification.strip():
+            return
+
         today = datetime.now().strftime("%Y-%m-%d")
         if classification not in self.data['streaks']:
             self.data['streaks'][classification] = {
@@ -119,9 +148,14 @@ class DataManager:
             today_date = datetime.strptime(today, "%Y-%m-%d")
             diff = (today_date - last_date).days
 
-            if diff == 1:
+            if diff == 0:
+                # Same day - streak continues but don't increment
+                pass
+            elif diff == 1:
+                # Next day - increment streak
                 streak['current'] += 1
-            elif diff > 1:
+            else:
+                # Missed days - reset streak
                 streak['current'] = 1
 
             streak['best'] = max(streak['best'], streak['current'])
@@ -192,7 +226,7 @@ class DataManager:
         stats['due_today'] = 0
         stats['overdue'] = 0
         for task in self.data['tasks']:
-            if task.get('due_date') and task.get('due_type') == 'specific':
+            if task.get('due_date') and task.get('due_type') == 'specific_date':
                 try:
                     due = datetime.fromisoformat(task['due_date']).date()
                     if due == today:
@@ -204,23 +238,28 @@ class DataManager:
 
         return stats
 
-    def export_to_csv(self, filename: str) -> None:
-        """Export tasks to CSV"""
-        with open(filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Name', 'Classification', 'Importance', 'Due Type',
-                           'Due Date', 'Progress', 'Notes', 'Created At'])
-            for task in self.data['tasks']:
-                writer.writerow([
-                    task.get('name', ''),
-                    task.get('classification', ''),
-                    task.get('importance', ''),
-                    task.get('due_type', ''),
-                    task.get('due_date', ''),
-                    task.get('progress', 0),
-                    task.get('notes', ''),
-                    task.get('created_at', '')
-                ])
+    def export_to_csv(self, filename: str) -> bool:
+        """Export tasks to CSV. Returns True on success, False on failure."""
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Name', 'Classification', 'Importance', 'Due Type',
+                               'Due Date', 'Progress', 'Notes', 'Created At'])
+                for task in self.data['tasks']:
+                    writer.writerow([
+                        task.get('name', ''),
+                        task.get('classification', ''),
+                        task.get('importance', ''),
+                        task.get('due_type', ''),
+                        task.get('due_date', ''),
+                        task.get('progress', 0),
+                        task.get('notes', ''),
+                        task.get('created_at', '')
+                    ])
+            return True
+        except (IOError, OSError) as e:
+            messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
+            return False
 
 
 # ============================================================================
@@ -364,23 +403,35 @@ class DateTimePicker(tk.Toplevel):
 
     def _prev_month(self):
         """Go to previous month"""
-        if self.current_date.month == 1:
-            self.current_date = self.current_date.replace(
-                year=self.current_date.year-1, month=12)
-        else:
-            self.current_date = self.current_date.replace(
-                month=self.current_date.month-1)
+        year = self.current_date.year
+        month = self.current_date.month - 1
+        if month < 1:
+            month = 12
+            year -= 1
+        # Handle day overflow (e.g., March 31 -> February 28)
+        day = min(self.current_date.day, self._days_in_month(year, month))
+        self.current_date = self.current_date.replace(year=year, month=month, day=day)
         self._update_calendar()
 
     def _next_month(self):
         """Go to next month"""
-        if self.current_date.month == 12:
-            self.current_date = self.current_date.replace(
-                year=self.current_date.year+1, month=1)
-        else:
-            self.current_date = self.current_date.replace(
-                month=self.current_date.month+1)
+        year = self.current_date.year
+        month = self.current_date.month + 1
+        if month > 12:
+            month = 1
+            year += 1
+        # Handle day overflow (e.g., January 31 -> February 28)
+        day = min(self.current_date.day, self._days_in_month(year, month))
+        self.current_date = self.current_date.replace(year=year, month=month, day=day)
         self._update_calendar()
+
+    def _days_in_month(self, year: int, month: int) -> int:
+        """Get number of days in a month"""
+        if month == 12:
+            next_month = datetime(year + 1, 1, 1)
+        else:
+            next_month = datetime(year, month + 1, 1)
+        return (next_month - datetime(year, month, 1)).days
 
     def _select_today(self):
         """Select today's date"""
@@ -393,13 +444,22 @@ class DateTimePicker(tk.Toplevel):
         try:
             hour = int(self.hour_var.get())
             minute = int(self.minute_var.get())
+
+            # Validate ranges
+            if not (0 <= hour <= 23):
+                messagebox.showerror("Error", "Hour must be between 0 and 23")
+                return
+            if not (0 <= minute <= 59):
+                messagebox.showerror("Error", "Minute must be between 0 and 59")
+                return
+
             self.result = datetime.combine(
                 self.selected_date,
                 datetime.min.time().replace(hour=hour, minute=minute)
             )
             self.destroy()
         except ValueError:
-            messagebox.showerror("Error", "Invalid time format")
+            messagebox.showerror("Error", "Invalid time format. Use numbers only.")
 
 
 class ProgressBar(ttk.Frame):
@@ -956,7 +1016,8 @@ class PersonalTracker(tk.Tk):
                 'status': 'active'
             }
 
-            if edit_task:
+            # Check if editing existing task (has valid id) or creating new
+            if edit_task and edit_task.get('id') and edit_task['id'] != '__prefill__':
                 self.data_manager.update_task(edit_task['id'], task_data)
             else:
                 self.data_manager.add_task(task_data)
@@ -968,6 +1029,12 @@ class PersonalTracker(tk.Tk):
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side='right', padx=5)
         ttk.Button(btn_frame, text="Save", command=save_task,
                   style='Accent.TButton').pack(side='right')
+
+    def _show_add_task_dialog_prefilled(self, prefill_data: Dict):
+        """Show add task dialog with pre-filled data (for promoting ideas)"""
+        # Use special marker id to indicate this is prefilled data, not an edit
+        prefill_data['id'] = '__prefill__'
+        self._show_add_task_dialog(edit_task=prefill_data)
 
     def _refresh_task_list(self):
         """Refresh the task list display"""
@@ -1115,7 +1182,9 @@ class PersonalTracker(tk.Tk):
         frame = ttk.Frame(dialog, padding="20")
         frame.pack(fill='both', expand=True)
 
-        ttk.Label(frame, text=f"Progress for: {task['name'][:40]}...").pack()
+        task_name = task.get('name', 'Task')
+        display_name = task_name[:40] + "..." if len(task_name) > 40 else task_name
+        ttk.Label(frame, text=f"Progress for: {display_name}").pack()
 
         progress_var = tk.IntVar(value=task.get('progress', 0))
         scale = ttk.Scale(frame, from_=0, to=100, variable=progress_var,
@@ -1191,17 +1260,22 @@ class PersonalTracker(tk.Tk):
         idea = self.data_manager.promote_backtrack(idea_id)
 
         if idea:
-            # Open task dialog with pre-filled data
+            # Create task directly with pre-filled data from idea
             task_data = {
                 'name': idea.get('text', ''),
                 'classification': idea.get('classification', 'Other'),
                 'notes': idea.get('notes', ''),
                 'importance': 'Medium',
                 'due_type': 'none',
-                'progress': 0
+                'due_date': None,
+                'progress': 0,
+                'recurring': False,
+                'status': 'active'
             }
-            self._show_add_task_dialog(edit_task={'id': 'new', **task_data})
+            # Pass None for edit_task to create a new task, but pre-fill the dialog
+            self._show_add_task_dialog_prefilled(task_data)
             self._refresh_backtrack_list()
+            self._update_statistics()
 
     def _delete_backtrack_idea(self):
         """Delete a backtrack idea"""
@@ -1292,8 +1366,8 @@ class PersonalTracker(tk.Tk):
             title="Export Tasks to CSV"
         )
         if filename:
-            self.data_manager.export_to_csv(filename)
-            messagebox.showinfo("Success", f"Tasks exported to {filename}")
+            if self.data_manager.export_to_csv(filename):
+                messagebox.showinfo("Success", f"Tasks exported to {filename}")
 
     def _show_statistics_dialog(self):
         """Show statistics in a dialog"""
@@ -1338,10 +1412,17 @@ def main():
     """Main entry point"""
     app = PersonalTracker()
 
+    def handle_delete(event):
+        """Handle delete key based on current tab"""
+        current_tab = app.notebook.index(app.notebook.select())
+        if current_tab == 0:  # Tasks tab
+            app._delete_selected_task()
+        elif current_tab == 1:  # Backtrack tab
+            app._delete_backtrack_idea()
+
     # Bind keyboard shortcuts
     app.bind('<Control-n>', lambda e: app._show_add_task_dialog())
-    app.bind('<Delete>', lambda e: app._delete_selected_task()
-             if app.notebook.index(app.notebook.select()) == 0 else None)
+    app.bind('<Delete>', handle_delete)
 
     app.mainloop()
 
